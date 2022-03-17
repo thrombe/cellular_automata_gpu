@@ -1,7 +1,11 @@
 
 struct Stuff {
-    width: f32;
-    height: f32;
+    render_width: u32;
+    render_height: u32;
+    display_width: u32;
+    display_height: u32;
+    windowless: u32;
+
     time: f32;
     cursor_x: f32;
     cursor_y: f32;
@@ -38,8 +42,9 @@ var<storage, read_write> buf1: Buf;
 [[group(0), binding(3)]]
 var<storage, read_write> buf2: Buf;
 
+[[group(0), binding(4)]]
+var compute_texture: texture_storage_2d<rgba32float, read_write>;
 
-// / import ./src/rng.wgsl
-
+/// import ./src/rng.wgsl
 /// import ./src/vertex.wgsl
 /// import ./src/gol_fragment.wgsl

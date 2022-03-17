@@ -24,7 +24,14 @@ plan:
     . this would prevent the damage caused by the oscillators
     . + this would look good + small cells
   . add button for randomised cells
+  . add a tick variable in stuff
+    . if tick is true, then do the calc. else just return color (to prevent the processing that happens currently if stuff.tick_time > 0)
   . add torus
+  . processing multiple generations per frame
+    . an odd number of generations would be easy as the i wont need to edit the buffer swaapping code
+    . make a func to get what buffer should be used
+  . impliment in compute shader such that only one compute instanciation is needed per cell (not per pixel)
   . add different algorithms like bbrain
   . try the cellular automata from the sabestian lague vids
   . try the slime mould stuff from sabestian lague vids
+  

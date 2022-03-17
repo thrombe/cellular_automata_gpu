@@ -10,19 +10,26 @@ use std::sync::mpsc::channel;
 
 use super::shader_importer;
 
+const RENDER_WIDTH: u32 = 1920;
+const RENDER_HEIGHT: u32 = 1080;
+
 struct State {
     surface: Option<wgpu::Surface>,
     config: Option<wgpu::SurfaceConfiguration>,
     size: Option<winit::dpi::PhysicalSize<u32>>,
 
     screen_texture: Option<wgpu::Texture>,
-    screen_texture_size: Option<u32>,
+    screen_texture_size: Option<(u32, u32)>,
     screen_texture_desc: Option<wgpu::TextureDescriptor<'static>>,
     screen_texture_view: Option<wgpu::TextureView>,
 
     my_turn: bool,
     screen_buffer1: wgpu::Buffer,
     screen_buffer2: wgpu::Buffer,
+    compute_texture: wgpu::Texture,
+    compute_texture_size: (u32, u32),
+    compute_texture_desc: wgpu::TextureDescriptor<'static>,
+    compute_texture_view: wgpu::TextureView,
 
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -65,7 +72,7 @@ impl State {
         ).await.unwrap();
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
+                features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                 limits: wgpu::Limits::default(),
                 label: None,
             },
@@ -81,9 +88,10 @@ impl State {
         };
         surface.configure(&device, &config);
         
-        let (screen_buffer1, screen_buffer2) = Self::get_screen_buffer_couple(&device);
+        let (screen_buffer1, screen_buffer2)= Self::get_screen_buffer_couple(&device);
+        let (compute_texture_size, compute_texture_desc, compute_texture, compute_texture_view) = Self::get_compute_texture(&device);
 
-        let (bind_group, bind_group_layouts, stuff_buffer, compute_buffer) = Self::get_bind_group(&device, &screen_buffer1, &screen_buffer2);
+        let (bind_group, bind_group_layouts, stuff_buffer, compute_buffer) = Self::get_bind_group(&device, &screen_buffer1, &screen_buffer2, &Stuff::new(), &compute_texture_view);
         let vertex_buffer = Self::get_vertex_buffer(&device);
 
 
@@ -97,6 +105,7 @@ impl State {
             time: std::time::Instant::now(), tick_time: 0.0,
             screen_texture: None, screen_texture_size: None, screen_texture_desc: None, screen_texture_view: None,
             screen_buffer1, screen_buffer2, my_turn: false,
+            compute_texture, compute_texture_desc, compute_texture_size, compute_texture_view,
         };
         state.compile();
         state
@@ -115,16 +124,26 @@ impl State {
             .await
             .unwrap();
         let (device, queue) = adapter
-            .request_device(&Default::default(), None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                    limits: wgpu::Limits::default(),
+                    label: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
         let (texture_size, texture_desc, texture, texture_view) = Self::get_screen_texture(&device);
         let vertex_buffer = Self::get_vertex_buffer(&device);
         let (screen_buffer1, screen_buffer2) = Self::get_screen_buffer_couple(&device);
+        let (compute_texture_size, compute_texture_desc, compute_texture, compute_texture_view) = Self::get_compute_texture(&device);
 
-        let (bind_group, bind_group_layouts, stuff_buffer, compute_buffer) = Self::get_bind_group(&device, &screen_buffer1, &screen_buffer2);
+        let stuff = Stuff::new();
+        let (bind_group, bind_group_layouts, stuff_buffer, compute_buffer) = Self::get_bind_group(&device, &screen_buffer1, &screen_buffer2, &stuff, &compute_texture_view);
         
+
         let mut state = Self {
             surface: None, size: None, device, queue, config: None, render_pipeline: None, compute_pipeline: None, work_group_count: 1,
             vertex_buffer, num_vertices: VERTICES.len() as u32,
@@ -135,6 +154,7 @@ impl State {
             time: std::time::Instant::now(), tick_time: 0.0,
             screen_texture: Some(texture), screen_texture_size: Some(texture_size), screen_texture_desc: Some(texture_desc), screen_texture_view: Some(texture_view),
             screen_buffer1, screen_buffer2, my_turn: false,
+            compute_texture, compute_texture_desc, compute_texture_size, compute_texture_view,
         };
         state.compile(); // fallback shader
         state.compile();
@@ -142,12 +162,12 @@ impl State {
     }
     
     
-    fn get_screen_texture<'a, 'b>(device: &'a wgpu::Device) -> (u32, wgpu::TextureDescriptor<'b>, wgpu::Texture, wgpu::TextureView) {
-        let texture_size = 1024u32; // should be a multiple of 256
+    fn get_screen_texture<'a, 'b>(device: &'a wgpu::Device) -> ((u32, u32), wgpu::TextureDescriptor<'b>, wgpu::Texture, wgpu::TextureView) {
+        let texture_size = (RENDER_WIDTH, RENDER_HEIGHT);
         let texture_desc = wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
-                width: texture_size,
-                height: texture_size,
+                width: texture_size.0,
+                height: texture_size.1,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -162,15 +182,35 @@ impl State {
         (texture_size, texture_desc, texture, texture_view)
     }
     
+    fn get_compute_texture<'a, 'b>(device: &'a wgpu::Device) -> ((u32, u32), wgpu::TextureDescriptor<'b>, wgpu::Texture, wgpu::TextureView) {
+        let texture_size = (RENDER_WIDTH, RENDER_HEIGHT);
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: texture_size.0,
+                height: texture_size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            label: None,
+        };
+        let texture = device.create_texture(&texture_desc);
+        let texture_view = texture.create_view(&Default::default());
+        (texture_size, texture_desc, texture, texture_view)
+    }
+    
     fn get_screen_buffer_couple<'a, 'b>(device: &'a wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer) {
         let buffer1 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("screen Buffer")),
-            contents: bytemuck::cast_slice(&vec![0u32 ; 1080*1920]),
+            contents: bytemuck::cast_slice(&vec![0u32 ; (RENDER_WIDTH*RENDER_HEIGHT) as usize]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let buffer2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("screen Buffer 2")),
-            contents: bytemuck::cast_slice(&vec![0u32 ; 1080*1920]),
+            contents: bytemuck::cast_slice(&vec![0u32 ; (RENDER_WIDTH*RENDER_HEIGHT) as usize]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         (buffer1, buffer2)
@@ -187,17 +227,17 @@ impl State {
         vertex_buffer
     }
 
-    fn get_bind_group(device: &wgpu::Device, buff1: &wgpu::Buffer, buff2: &wgpu::Buffer) -> (wgpu::BindGroup, wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer) {
+    fn get_bind_group(device: &wgpu::Device, buff1: &wgpu::Buffer, buff2: &wgpu::Buffer, stuff: &Stuff, texture_view: &wgpu::TextureView) -> (wgpu::BindGroup, wgpu::BindGroupLayout, wgpu::Buffer, wgpu::Buffer) {
         let compute_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("Compute Buffer")),
-            contents: bytemuck::cast_slice(&vec![0u32 ; 1080*1920]),
+            contents: bytemuck::cast_slice(&vec![0u32 ; (RENDER_WIDTH*RENDER_HEIGHT) as usize]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let stuff_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("stuff buffer"),
-                contents: bytemuck::cast_slice(&[Stuff::new()]),
+                contents: bytemuck::cast_slice(&[*stuff]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }
         );
@@ -245,6 +285,16 @@ impl State {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { // https://sotrh.github.io/learn-wgpu/beginner/tutorial5-textures/#shader-time
+                    binding: 4, // compute texture
+                    visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                }
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -267,10 +317,30 @@ impl State {
                     binding: 3,
                     resource: buff2.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                }
             ],
         });
 
         (bind_group, bind_group_layouts, stuff_buffer, compute_buffer)
+    }
+
+    fn reset_buffers(&mut self, reset_screen_buffer: bool) {
+        if reset_screen_buffer {
+            let (screen_buffer1, screen_buffer2) = Self::get_screen_buffer_couple(&self.device);
+            self.screen_buffer1 = screen_buffer1;
+            self.screen_buffer2 = screen_buffer2;
+            let (_, _, compute_texture, compute_texture_view) = Self::get_compute_texture(&self.device);
+            self.compute_texture = compute_texture;
+            self.compute_texture_view = compute_texture_view;
+        }
+        let (bind_group, bind_group_layouts, stuff_buffer, compute_buffer) = Self::get_bind_group(&self.device, &self.screen_buffer1, &self.screen_buffer2, &self.stuff, &self.compute_texture_view);
+        self.bind_group = bind_group;
+        self.bind_group_layouts = bind_group_layouts;
+        self.compute_buffer = compute_buffer;
+        self.stuff_buffer = stuff_buffer;
     }
 
     fn fallback_shader() -> String {
@@ -296,8 +366,8 @@ impl State {
             self.config.as_mut().unwrap().height = new_size.height;
             self.surface.as_mut().unwrap().configure(&self.device, &self.config.as_ref().unwrap());
 
-            self.stuff.width = self.size.unwrap().width as f32;
-            self.stuff.height = self.size.unwrap().height as f32;    
+            self.stuff.display_width = self.size.unwrap().width;
+            self.stuff.display_height = self.size.unwrap().height;
         }
     }
 
@@ -316,14 +386,31 @@ impl State {
                     winit::event::MouseButton::Left => self.stuff.mouse_left = p_or_r,
                     winit::event::MouseButton::Right => self.stuff.mouse_right = p_or_r,
                     winit::event::MouseButton::Middle => self.stuff.mouse_middle = p_or_r,
-                    _ => (),
+                    _ => return false,
                 }
             },
             WindowEvent::MouseWheel {delta, ..} => {
                 match delta {
                     // winit::event::MouseScrollDelta::PixelDelta(pp) => self.stuff.scroll += (pp.y+pp.x) as f32,
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => self.stuff.scroll += (x+y) as f32,
-                    _ => (),
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => self.stuff.scroll += x+y,
+                    _ => return false,
+                }
+            },
+            WindowEvent::KeyboardInput {input, ..} => {
+                match input {
+                    KeyboardInput {
+                        state: ElementState::Pressed,
+                        virtual_keycode: Some(k),
+                        ..
+                    } => {
+                        match k {
+                            VirtualKeyCode::R => {
+                                self.reset_buffers(true);
+                            },
+                            _ => return false,
+                        }
+                    },
+                    _ => return false,
                 }
             },
             _ => return false,
@@ -336,7 +423,7 @@ impl State {
 
         self.queue.write_buffer(&self.stuff_buffer, 0, bytemuck::cast_slice(&[self.stuff]));
 
-        if self.time.elapsed().as_secs_f32() - self.tick_time > 0.1 {
+        if self.time.elapsed().as_secs_f32() - self.tick_time > 0.0 {
             self.tick_time = self.time.elapsed().as_secs_f32();
             self.my_turn = !self.my_turn;
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -359,6 +446,10 @@ impl State {
                         binding: if self.my_turn {3} else {2},
                         resource: self.screen_buffer2.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.compute_texture_view),
+                    }    
                 ],
             });
             self.bind_group = bind_group;
@@ -367,7 +458,7 @@ impl State {
         self.compile();
     }
 
-    fn compile(&mut self) {
+    fn compile(&mut self) -> bool {
         let shader_code = {
             if self.shader_code.is_none() {
                 Some(Self::fallback_shader())
@@ -377,13 +468,13 @@ impl State {
                 self.importer.import()
             }
         };
-        if shader_code.is_none() {return}
-        if !self.compile_status && self.shader_code == shader_code {return}
+        if shader_code.is_none() {return true}
+        if !self.compile_status && self.shader_code == shader_code {return true}
         self.shader_code = shader_code;
 
-        self.compile_render_shaders();
+        let mut compile_stat = self.compile_render_shaders();
         if self.importer.compute | self.compute_pipeline.is_none() {
-            self.compile_compute_shaders();
+            compile_stat = compile_stat && self.compile_compute_shaders();
         }
         
         // update work_group_count if edited in shaders
@@ -394,9 +485,10 @@ impl State {
                 self.work_group_count = work_group_count;
             }
         };
+        compile_stat
     }
 
-    fn compile_render_shaders(&mut self) {
+    fn compile_render_shaders(&mut self) -> bool {
         let (tx, rx) = channel::<wgpu::Error>();
         self.device.on_uncaptured_error(move |e: wgpu::Error| {
             tx.send(e).expect("sending error failed");
@@ -453,14 +545,15 @@ impl State {
         if let Ok(err) = rx.try_recv() {
             self.compile_status = false;
             println!("{}", err);
-            return;
+            return false;
         }
         dbg!("render shaders compiled");
         self.compile_status = true;
         self.render_pipeline = Some(render_pipeline);
+        true
     }
 
-    fn compile_compute_shaders(&mut self) {
+    fn compile_compute_shaders(&mut self) -> bool {
         let (tx, rx) = channel::<wgpu::Error>();
         self.device.on_uncaptured_error(move |e: wgpu::Error| {
             tx.send(e).expect("sending error failed");
@@ -486,11 +579,12 @@ impl State {
         if let Ok(err) = rx.try_recv() {
             self.compile_status = false;
             println!("{}", err);
-            return;
+            return false;
         }
         dbg!("compute shaders compiled");
         self.compile_status = true;
         self.compute_pipeline = Some(compute_pipeline);
+        true
     }
 
     fn get_render_pass<'a>(encoder: &'a mut wgpu::CommandEncoder, view: &'a wgpu::TextureView) -> wgpu::RenderPass<'a> {
@@ -730,8 +824,11 @@ const VERTICES: &[Vertex] = &[
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Stuff {
-    width: f32,
-    height: f32,
+    render_width: u32,
+    render_height: u32,
+    display_width: u32,
+    display_height: u32,
+    windowless: u32,
     time: f32,
     cursor_x: f32,
     cursor_y: f32,
@@ -747,8 +844,11 @@ struct Stuff {
 impl Stuff {
     fn new() -> Self {
         Self {
-            width: 100.0,
-            height: 100.0,
+            render_width: RENDER_WIDTH,
+            render_height: RENDER_HEIGHT,
+            display_width: 100,
+            display_height: 100,
+            windowless: 0,
             time: 0.0,
             cursor_x: 0.0,
             cursor_y: 0.0,
